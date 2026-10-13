@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const crypto = require('crypto');
+const { findReply, toHiragana } = require('./filter');
 
 let sharp = null;
 try {
@@ -62,7 +63,7 @@ const IP_IMAGE_VIEWS_PER_MIN = 600;
 const MAX_CONCURRENT_UPLOADS = 1;
 const IMAGE_RULES = {
     off: '',
-    admin: '<li>画像を貼れるのは管理人だけです(テストが終わり次第全員画像OK)</li>',
+    admin: '<li>画像を貼れるのは管理人だけです</li>',
     all: '<li>画像（JPEG・PNG・GIF・WebP）を貼れます。最初はぼかして表示され、タップで見られます。サーバーで変換するのでGIFは止まった絵になります。通報されると画像だけすぐ消えます</li>'
 };
 
@@ -1055,53 +1056,6 @@ function checkAdmin(socket, secret) {
     }
     adminFails.take(ip, now);
     return false;
-}
-
-function toHiragana(str) {
-    return str.replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));
-}
-
-function prepareWords(words) {
-    return words.map(w => toHiragana(w.normalize('NFKC').toLowerCase()));
-}
-
-const RULES = [
-    {
-        target: 'letters',
-        reply: "おいらと交際を前提に結婚してください(逆でうんち)",
-        words: prepareWords(['殺す', 'ころす', '殺せ', 'ころせ'])
-    },
-    {
-        target: 'letters',
-        reply: "愛してるぜ…",
-        words: prepareWords(['氏ね', 'くたばれ', '消えろ', 'きえろ']),
-        patterns: [
-            /死[^\p{L}\p{N}]*ね(?!ない|なかっ|る)/u,
-            /(^|[^ぁ-ゖ])し[^\p{L}\p{N}]*ね/u,
-            /シ[^\p{L}\p{N}]*ネ(?![マコ])/u,
-            /(おまえ|てめえ|てめぇ|きさま|あんた)し[^\p{L}\p{N}]*ね/u
-        ]
-    },
-    {
-        target: 'compact',
-        reply: "（おいらのハートがハッキングされちゃったみたいだ…キュン♡）",
-        words: prepareWords(['.exe', 'javascript:'])
-    }
-];
-
-function findReply(text) {
-    const normalized = text.normalize('NFKC').toLowerCase();
-    const forms = {
-        raw: normalized,
-        compact: normalized.replace(/\s+/g, ''),
-        letters: toHiragana(normalized).replace(/[^\p{L}\p{N}]/gu, '')
-    };
-    for (const rule of RULES) {
-        const wordHit = rule.words.some(w => forms[rule.target].includes(w));
-        const patternHit = (rule.patterns || []).some(p => p.test(forms.raw));
-        if (wordHit || patternHit) return rule.reply;
-    }
-    return null;
 }
 
 const searchKeys = new WeakMap();
