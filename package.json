@@ -1,0 +1,17 @@
+{
+  "name": "five-min-bbs",
+  "version": "1.0.0",
+  "description": "5分で消える暴言強制変換掲示板",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1",
+    "sharp": "^0.35.4"
+  }
+}
