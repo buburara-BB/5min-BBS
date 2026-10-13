@@ -62,7 +62,7 @@ const IP_IMAGE_VIEWS_PER_MIN = 600;
 const MAX_CONCURRENT_UPLOADS = 1;
 const IMAGE_RULES = {
     off: '',
-    admin: '<li>画像を貼れるのは管理人だけです</li>',
+    admin: '<li>画像を貼れるのは管理人だけです(テストが終わり次第全員画像OK)</li>',
     all: '<li>画像（JPEG・PNG・GIF・WebP）を貼れます。最初はぼかして表示され、タップで見られます。サーバーで変換するのでGIFは止まった絵になります。通報されると画像だけすぐ消えます</li>'
 };
 
