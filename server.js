@@ -16,6 +16,7 @@ try {
 const app = express();
 const server = http.createServer(app);
 server.requestTimeout = 60000;
+server.headersTimeout = 15000;
 const io = new Server(server, { maxHttpBufferSize: 1e5 });
 
 const TTL_MS = 300000;
@@ -61,6 +62,17 @@ const MAX_PENDING_TOKENS = 3;
 const IP_UPLOADS_PER_MIN = 6;
 const IP_IMAGE_VIEWS_PER_MIN = 600;
 const MAX_CONCURRENT_UPLOADS = 1;
+const HTTP_PER_SEC = 50;
+const HTTP_PER_MIN = 500;
+const BAN_STRIKES = 6;
+const BAN_STRIKE_WINDOW_MS = 300000;
+const BAN_BASE_MS = 300000;
+const BAN_MAX_MS = 21600000;
+const BAN_MAX_ENTRIES = 20000;
+const MAX_LIMITER_KEYS = 20000;
+const ADMIN_FAILS_GLOBAL_PER_10MIN = 60;
+const IP_ALLOWLIST = new Set(String(process.env.IP_ALLOWLIST || '').split(',').map(s => normalizeIp(s.trim())).filter(Boolean));
+const DEBUG_IP = process.env.DEBUG_IP === '1';
 const IMAGE_RULES = {
     off: '',
     admin: '<li>画像を貼れるのは管理人だけです</li>',
@@ -94,8 +106,16 @@ let activeUploads = 0;
 
 function createLimiter(windowMs, max) {
     const hits = new Map();
+    let lastPurge = 0;
     return {
         take(key, now) {
+            if (hits.size >= MAX_LIMITER_KEYS && !hits.has(key)) {
+                if (now - lastPurge >= 1000) {
+                    lastPurge = now;
+                    this.purge(now);
+                }
+                if (hits.size >= MAX_LIMITER_KEYS) return false;
+            }
             const list = (hits.get(key) || []).filter(t => now - t < windowMs);
             if (list.length >= max) {
                 hits.set(key, list);
@@ -132,9 +152,157 @@ const ipReports = createLimiter(60000, IP_REPORTS_PER_MIN);
 const adminFails = createLimiter(600000, ADMIN_FAILS_PER_10MIN);
 const ipUploads = createLimiter(60000, IP_UPLOADS_PER_MIN);
 const ipImageViews = createLimiter(60000, IP_IMAGE_VIEWS_PER_MIN);
-const allLimiters = [globalAttempts, ipAttempts, ipPosts, ipThreads, ipJoins, ipSearches, globalSearches, ipReports, adminFails, ipUploads, ipImageViews];
+const httpPerSec = createLimiter(1000, HTTP_PER_SEC);
+const httpPerMin = createLimiter(60000, HTTP_PER_MIN);
+const adminFailsGlobal = createLimiter(600000, ADMIN_FAILS_GLOBAL_PER_10MIN);
+const allLimiters = [globalAttempts, ipAttempts, ipPosts, ipThreads, ipJoins, ipSearches, globalSearches, ipReports, adminFails, ipUploads, ipImageViews, httpPerSec, httpPerMin, adminFailsGlobal];
 const connPerIp = new Map();
 let connectionCount = 0;
+
+class BanList {
+    constructor(options) {
+        this.strikesToBan = Math.max(1, options.strikesToBan);
+        this.strikeWindowMs = options.strikeWindowMs;
+        this.banBaseMs = options.banBaseMs;
+        this.banMaxMs = options.banMaxMs;
+        this.maxEntries = Math.max(1, options.maxEntries);
+        this.now = options.now || Date.now;
+        this.entries = new Map();
+        this.lastSweep = 0;
+    }
+
+    get size() {
+        return this.entries.size;
+    }
+
+    remainingMs(ip) {
+        const entry = this.entries.get(ip);
+        if (!entry) {
+            return 0;
+        }
+        const remaining = entry.bannedUntil - this.now();
+        return remaining > 0 ? remaining : 0;
+    }
+
+    isBanned(ip) {
+        return this.remainingMs(ip) > 0;
+    }
+
+    strike(ip, minGapMs = 0) {
+        const now = this.now();
+        let entry = this.entries.get(ip);
+        if (!entry) {
+            this.makeRoom();
+            entry = { count: 0, windowStart: now, bannedUntil: 0, level: 0, touched: now, lastStrikeAt: 0 };
+            this.entries.set(ip, entry);
+        }
+        entry.touched = now;
+        if (entry.bannedUntil > now) {
+            return false;
+        }
+        if (minGapMs > 0 && entry.lastStrikeAt > 0 && now - entry.lastStrikeAt < minGapMs) {
+            return false;
+        }
+        entry.lastStrikeAt = now;
+        if (now - entry.windowStart > this.strikeWindowMs) {
+            entry.count = 0;
+            entry.windowStart = now;
+        }
+        entry.count += 1;
+        if (entry.count < this.strikesToBan) {
+            return false;
+        }
+        entry.level += 1;
+        entry.count = 0;
+        entry.windowStart = now;
+        const duration = Math.min(this.banBaseMs * 2 ** (entry.level - 1), this.banMaxMs);
+        entry.bannedUntil = now + duration;
+        return true;
+    }
+
+    isExpired(entry, now) {
+        if (entry.bannedUntil > now) {
+            return false;
+        }
+        const memory = entry.level > 0 ? this.banMaxMs : this.strikeWindowMs;
+        return now - entry.touched > memory;
+    }
+
+    sweep() {
+        const now = this.now();
+        for (const [ip, entry] of this.entries) {
+            if (this.isExpired(entry, now)) {
+                this.entries.delete(ip);
+            }
+        }
+    }
+
+    makeRoom() {
+        if (this.entries.size < this.maxEntries) {
+            return;
+        }
+        const now = this.now();
+        if (now - this.lastSweep >= 1000) {
+            this.lastSweep = now;
+            this.sweep();
+            if (this.entries.size < this.maxEntries) {
+                return;
+            }
+        }
+        let toRemove = Math.ceil(this.maxEntries * 0.1);
+        for (const [ip, entry] of this.entries) {
+            if (toRemove <= 0) {
+                break;
+            }
+            if (entry.bannedUntil <= now) {
+                this.entries.delete(ip);
+                toRemove -= 1;
+            }
+        }
+        while (this.entries.size >= this.maxEntries) {
+            this.entries.delete(this.entries.keys().next().value);
+        }
+    }
+}
+
+const banList = new BanList({
+    strikesToBan: BAN_STRIKES,
+    strikeWindowMs: BAN_STRIKE_WINDOW_MS,
+    banBaseMs: BAN_BASE_MS,
+    banMaxMs: BAN_MAX_MS,
+    maxEntries: BAN_MAX_ENTRIES
+});
+const guardStats = { blocked: 0, banned: 0, lastBanned: null, logged: 0 };
+let debugIpCount = 0;
+
+function normalizeIp(ip) {
+    const text = String(ip || '');
+    return text.startsWith('::ffff:') ? text.slice(7) : text;
+}
+
+function isBannedIp(ip) {
+    const key = normalizeIp(ip);
+    return !IP_ALLOWLIST.has(key) && banList.isBanned(key);
+}
+
+function strikeIp(ip, minGapMs) {
+    const key = normalizeIp(ip);
+    if (IP_ALLOWLIST.has(key)) return false;
+    if (!banList.strike(key, minGapMs)) return false;
+    guardStats.banned++;
+    guardStats.lastBanned = key;
+    if (guardStats.logged < 5) {
+        guardStats.logged++;
+        console.log('[防御壁] BAN: ' + key);
+    }
+    return true;
+}
+
+function debugIp(headers, address, picked) {
+    if (!DEBUG_IP || debugIpCount >= 10) return;
+    debugIpCount++;
+    console.log('[IP確認] x-forwarded-for=' + headers['x-forwarded-for'] + ' / address=' + address + ' / 採用=' + picked + ' / hops=' + TRUSTED_PROXY_HOPS);
+}
 
 function clientIp(socket) {
     return ipFromHeaders(socket.handshake.headers, socket.handshake.address);
@@ -142,13 +310,18 @@ function clientIp(socket) {
 
 function ipFromHeaders(headers, address) {
     const header = headers['x-forwarded-for'];
+    let picked = null;
     if (typeof header === 'string' && header.length > 0 && header.length < 1000) {
         const chain = header.split(',').map(s => s.trim()).filter(Boolean);
         if (chain.length > 0) {
-            return chain[Math.max(0, chain.length - TRUSTED_PROXY_HOPS)].slice(0, 64);
+            picked = chain[Math.max(0, chain.length - TRUSTED_PROXY_HOPS)].slice(0, 64);
         }
     }
-    return String(address || 'unknown').slice(0, 64);
+    if (picked === null) {
+        picked = String(address || 'unknown').slice(0, 64);
+    }
+    debugIp(headers, address, picked);
+    return picked;
 }
 
 const HTML = String.raw`<!DOCTYPE html>
@@ -896,6 +1069,32 @@ const PAGE = HTML
     .split('__POST_CD__').join(String(COOLDOWN_MS / 1000))
     .split('__THREAD_CD__').join(String(THREAD_COOLDOWN_MS / 1000));
 
+app.disable('x-powered-by');
+
+app.use((req, res, next) => {
+    res.set({
+        'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'DENY',
+        'Referrer-Policy': 'no-referrer'
+    });
+    const now = Date.now();
+    const ip = ipFromHeaders(req.headers, req.socket && req.socket.remoteAddress);
+    if (IP_ALLOWLIST.has(normalizeIp(ip))) return next();
+    if (isBannedIp(ip)) {
+        guardStats.blocked++;
+        res.set('Retry-After', String(Math.ceil(banList.remainingMs(normalizeIp(ip)) / 1000)));
+        return res.status(429).type('text/plain').send('アクセスが制限されています。しばらく時間をおいてください。');
+    }
+    if (req.path.startsWith('/img/')) return next();
+    if (!httpPerSec.take(ip, now) || !httpPerMin.take(ip, now)) {
+        guardStats.blocked++;
+        strikeIp(ip, 1000);
+        res.set('Retry-After', '10');
+        return res.status(429).type('text/plain').send('リクエストが多すぎます。しばらく時間をおいてください。');
+    }
+    next();
+});
+
 app.get('/', (req, res) => {
     res.type('html').send(PAGE);
 });
@@ -1049,12 +1248,17 @@ function checkAdmin(socket, secret) {
     if (secret === null || !ADMIN_ENABLED) return false;
     const now = Date.now();
     const ip = socket.data.ip;
-    if (adminFails.count(ip, now) >= ADMIN_FAILS_PER_10MIN) return false;
+    if (adminFails.count(ip, now) >= ADMIN_FAILS_PER_10MIN) {
+        strikeIp(ip, 10000);
+        return false;
+    }
+    if (adminFailsGlobal.count('all', now) >= ADMIN_FAILS_GLOBAL_PER_10MIN) return false;
     if (secretMatches(secret)) {
         socket.data.admin = true;
         return true;
     }
     adminFails.take(ip, now);
+    adminFailsGlobal.take('all', now);
     return false;
 }
 
@@ -1245,7 +1449,17 @@ io.use((socket, next) => {
     const now = Date.now();
     const ip = clientIp(socket);
     socket.data.ip = ip;
-    if (!globalAttempts.take('all', now) || !ipAttempts.take(ip, now)) {
+    if (isBannedIp(ip)) {
+        guardStats.blocked++;
+        return next(new Error('banned'));
+    }
+    if (!globalAttempts.take('all', now)) {
+        guardStats.blocked++;
+        return next(new Error('too many attempts'));
+    }
+    if (!ipAttempts.take(ip, now)) {
+        guardStats.blocked++;
+        strikeIp(ip, 1000);
         return next(new Error('too many attempts'));
     }
     if (connectionCount >= MAX_CONNECTIONS || (connPerIp.get(ip) || 0) >= MAX_CONN_PER_IP) {
@@ -1280,6 +1494,8 @@ io.on('connection', (socket) => {
         recentEvents = recentEvents.filter(t => now - t < 10000);
         recentEvents.push(now);
         if (recentEvents.length > EVENTS_PER_10S) {
+            guardStats.blocked++;
+            strikeIp(ip, 1000);
             socket.disconnect(true);
             return;
         }
@@ -1551,7 +1767,10 @@ setInterval(() => {
     const now = Date.now();
     const dirtyBoards = new Set();
     sweepTicks++;
-    if (sweepTicks % 60 === 0) allLimiters.forEach(l => l.purge(now));
+    if (sweepTicks % 60 === 0) {
+        allLimiters.forEach(l => l.purge(now));
+        banList.sweep();
+    }
     if (sweepTicks % 10 === 0) purgeReports(now);
     images.forEach((img, id) => {
         if (img.expireAt <= now) dropImage(id);
@@ -1583,6 +1802,15 @@ setInterval(() => {
     dirtyBoards.forEach(emitBoard);
     if (countsChanged) emitCounts();
 }, 1000);
+
+setInterval(() => {
+    if (guardStats.blocked > 0 || guardStats.banned > 0) {
+        console.log('[防御壁] 直近10秒: 遮断 ' + guardStats.blocked + '件 / 新規BAN ' + guardStats.banned + '件 / 管理中IP ' + banList.size + '件' + (guardStats.lastBanned ? ' / 最後にBANしたIP ' + guardStats.lastBanned : ''));
+    }
+    guardStats.blocked = 0;
+    guardStats.banned = 0;
+    guardStats.logged = 0;
+}, 10000).unref();
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
