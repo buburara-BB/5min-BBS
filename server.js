@@ -394,6 +394,7 @@ const HTML = String.raw`<!DOCTYPE html>
             <li>サーバーの再起動などで、5分たつ前でも全部消えることがあります</li>
             <li>「&gt;&gt;1」と書くと返信になります。レス番号をタップすると、入力欄に入ります</li>
             <li>検索できるのは、まだ消えてないスレ題名と書き込みだけです</li>
+            <li><a href="/terms">利用規約</a>を読んでから使ってください</li>
             __IMAGE_RULE__
             <li>ひどい書き込みは「通報」を押してください。__REPORT_N__人が通報すると自動で非表示になります</li>
         </ul>
@@ -1097,6 +1098,84 @@ app.use((req, res, next) => {
 
 app.get('/', (req, res) => {
     res.type('html').send(PAGE);
+});
+
+const CONTACT_X = String(process.env.CONTACT_X || '').replace(/[^A-Za-z0-9_]/g, '').slice(0, 15);
+const TERMS_CONTACT = CONTACT_X
+    ? '管理人のX（<a href="https://x.com/' + CONTACT_X + '" rel="noopener noreferrer">@' + CONTACT_X + '</a>）のDM'
+    : '管理人のXアカウントのDM';
+
+const TERMS_PAGE = `<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>利用規約｜5分限定・暴言強制浄化掲示板</title>
+    <style>
+        body { background-color: #efefef; color: #000; font-family: "MS PGothic", sans-serif; padding: 10px; font-size: 15px; line-height: 1.7; margin: 0; }
+        .wrap { max-width: 600px; margin: 0 auto; padding: 10px; }
+        h1 { color: #ff0000; font-size: 22px; text-align: center; margin: 10px 0 20px; }
+        h2 { font-size: 16px; margin: 22px 0 6px; border-left: 4px solid #ff0000; padding-left: 8px; }
+        ul { margin: 6px 0; padding-left: 20px; }
+        li { margin-bottom: 4px; word-break: break-all; }
+        p { margin: 6px 0; }
+        a { color: #0000ee; }
+        .back { display: inline-block; margin: 4px 0 8px; font-size: 14px; }
+        .date { color: #555; font-size: 13px; margin-top: 24px; }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <a class="back" href="/">← 掲示板に戻る</a>
+    <h1>利用規約</h1>
+
+    <p>この掲示板（以下「当掲示板」）は、管理人が個人で運営しています。利用した時点で、以下の内容に同意したものとみなします。</p>
+
+    <h2>1. 禁止事項</h2>
+    <ul>
+        <li>法令に違反する書き込み、犯罪への勧誘（いわゆる闇バイトの募集など）</li>
+        <li>他人の個人情報（住所・電話番号・勤務先・学校名など）の書き込み</li>
+        <li>特定の個人や団体への誹謗中傷、脅迫、嫌がらせ</li>
+        <li>出会い目的の書き込み、連絡先（SNSのIDなど）の交換</li>
+        <li>性的な内容の書き込み、特に未成年に関わるもの</li>
+        <li>詐欺、勧誘、宣伝、スパム</li>
+        <li>著作権など、他人の権利を侵害する書き込みや画像</li>
+        <li>当掲示板の運営を妨げる行為（連投、大量アクセス、不正アクセスなど）</li>
+    </ul>
+
+    <h2>2. 暴言の自動変換について</h2>
+    <p>一部の暴言は、自動で別の言葉に変換されます。この変換は完全ではありません。変換されなかった書き込みにも、上の禁止事項は適用されます。</p>
+
+    <h2>3. 書き込みの削除と利用の制限</h2>
+    <p>管理人は、禁止事項に当たる、または運営上ふさわしくないと判断した書き込みを、予告なく削除できます。また、そのような行為をした人のアクセスを制限できます。通報が一定数集まった書き込みは、自動で非表示になります。</p>
+
+    <h2>4. 書き込みの保存</h2>
+    <p>書き込みは、5分で自動的に消えます。サーバーの再起動などで、それより早く消えることもあります。書き込みの保存や復元は、保証しません。</p>
+
+    <h2>5. アクセス情報の扱い</h2>
+    <p>連投や荒らしを防ぐために、アクセス元のIPアドレスを一時的に利用します。広告や分析の目的では使っていません。なお、利用しているホスティングサービスのログに、アクセス情報が残る場合があります。法令に基づく開示の請求があった場合は、法令に従って対応することがあります。</p>
+
+    <h2>6. 免責</h2>
+    <p>書き込みの内容については、書いた人が責任を負います。法令で認められる範囲で、当掲示板の利用や、利用できなかったことで生じた損害について、管理人は責任を負いません。</p>
+
+    <h2>7. 運営の変更と終了</h2>
+    <p>管理人は、予告なく当掲示板の内容を変更したり、一時的に止めたり、終了したりすることがあります。</p>
+
+    <h2>8. 規約の変更</h2>
+    <p>この規約は、予告なく変更することがあります。変更後に利用した場合は、変更後の規約に同意したものとみなします。</p>
+
+    <h2>9. 連絡先</h2>
+    <p>不具合の報告、書き込みの削除の依頼、その他のお問い合わせは、__CONTACT__へお願いします。</p>
+
+    <p class="date">2026年10月22日 制定</p>
+    <a class="back" href="/">← 掲示板に戻る</a>
+</div>
+</body>
+</html>
+`.split('__CONTACT__').join(TERMS_CONTACT);
+
+app.get('/terms', (req, res) => {
+    res.type('html').send(TERMS_PAGE);
 });
 
 function dropImage(id) {
